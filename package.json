@@ -1,0 +1,13 @@
+{
+  "name": "wechat-notion-mini-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.ts",
+    "test": "node --test src/agent.test.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
