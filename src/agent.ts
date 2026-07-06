@@ -6,6 +6,7 @@
   SubscriptionRecord,
   TaskRecord
 } from './notion.ts';
+import { parseWithLlm } from './llm.ts';
 
 type IncomingMessage = {
   idempotencyKey: string;
@@ -13,17 +14,17 @@ type IncomingMessage = {
   source: Source;
 };
 
-type AgentResult = {
+export type AgentResult = {
   reply: string;
   component: 'task' | 'bookmark' | 'subscription' | 'reminder' | 'unsupported';
 };
 
-type ParsedIntent =
+export type ParsedIntent =
   | { component: 'task'; action: 'create' | 'query' | 'update_status'; fields?: Partial<TaskRecord> }
   | { component: 'bookmark'; action: 'create' | 'query'; fields?: Partial<BookmarkRecord> }
   | { component: 'subscription'; action: 'create' | 'query' | 'update_status'; fields?: Partial<SubscriptionRecord> }
   | { component: 'reminder'; action: 'create' | 'query' | 'update_status'; fields?: Partial<ReminderRecord> }
-  | { component: 'unsupported'; action: 'unsupported' };
+  | { component: 'unsupported'; action: 'unsupported'; reply?: string };
 
 export class MiniAgent {
   private readonly notion: MemoryNotionAdapter;
@@ -37,9 +38,10 @@ export class MiniAgent {
       return { component: 'unsupported', reply: '这条消息已处理过，不会重复写入。' };
     }
 
-    const parsed = parseIntent(message.text, message.source);
+    let parsed: ParsedIntent = { component: 'unsupported', action: 'unsupported' };
     let result: AgentResult;
     try {
+      parsed = await this.parseMessage(message);
       result = await this.runIntent(parsed, message);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -70,6 +72,13 @@ export class MiniAgent {
       status: result.component === 'unsupported' ? 'ignored' : 'processed'
     });
     return result;
+  }
+
+  private async parseMessage(message: IncomingMessage): Promise<ParsedIntent> {
+    if (this.notion.settings.llm.enabled && this.notion.hasLlmKey() && !this.notion.settings.llm.base_url.startsWith('local://')) {
+      return parseWithLlm(message.text, message.source, this.notion.settings.llm, this.notion.getLlmApiKey());
+    }
+    return parseIntent(message.text, message.source);
   }
 
   private async runIntent(parsed: ParsedIntent, message: IncomingMessage): Promise<AgentResult> {
@@ -162,7 +171,7 @@ export class MiniAgent {
 
     return {
       component: 'unsupported',
-      reply: '暂时只支持任务、收藏、订阅和提醒。'
+      reply: parsed.reply ?? '暂时只支持任务、收藏、订阅和提醒。'
     };
   }
 
@@ -316,5 +325,4 @@ function formatList(title: string, items: string[]): string {
   if (items.length === 0) return `${title}：暂无。`;
   return `${title}：\n${items.map((item, index) => `${index + 1}. ${item}`).join('\n')}`;
 }
-
 

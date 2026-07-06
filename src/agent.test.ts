@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MiniAgent } from './agent.ts';
-import { MemoryNotionAdapter } from './notion.ts';
+import { FileNotionAdapter, MemoryNotionAdapter } from './notion.ts';
 
 test('creates one task for duplicate message deliveries', async () => {
   const notion = new MemoryNotionAdapter();
@@ -167,4 +167,76 @@ test('binds a local openid with a one-time auth code', async () => {
   assert.equal(binding.status, 'active');
   assert.equal(notion.activeBinding()?.id, binding.id);
   await assert.rejects(() => notion.bindOpenid(authCode.code, 'openid-1'), /已使用/);
+});
+
+test('uses configured OpenAI-compatible LLM parsing', async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (url) => {
+    assert.equal(String(url), 'https://llm.test/v1/chat/completions');
+    return new Response(JSON.stringify({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            component: 'task',
+            action: 'create',
+            confidence: 0.9,
+            fields: { title: 'LLM 任务' }
+          })
+        }
+      }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  const notion = new MemoryNotionAdapter();
+  await notion.saveSettings({ llm: { ...notion.settings.llm, base_url: 'https://llm.test/v1' } });
+  await notion.saveSecrets({ llm_api_key: 'test-key' });
+  const agent = new MiniAgent(notion);
+
+  const result = await agent.handleMessage({
+    idempotencyKey: 'llm-task',
+    text: '这个句子本地规则不认识',
+    source: 'admin'
+  });
+
+  assert.match(result.reply, /已添加任务/);
+  assert.equal(notion.records.tasks[0]?.title, 'LLM 任务');
+});
+
+test('writes tasks to Notion REST when token and database id are configured', async (t) => {
+  const originalFetch = globalThis.fetch;
+  const calls: { url: string; body: Record<string, unknown> }[] = [];
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), body: JSON.parse(String(init?.body ?? '{}')) });
+    return new Response(JSON.stringify({ id: 'notion-page-1', properties: {} }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+
+  const notion = new FileNotionAdapter(`/private/tmp/notion-test-${Date.now()}.json`);
+  await notion.saveSettings({
+    notion: {
+      ...notion.settings.notion,
+      databases: { ...notion.settings.notion.databases, tasks: 'tasks-db' }
+    }
+  });
+  await notion.saveSecrets({ notion_token: 'notion-secret' });
+
+  const task = await notion.create_task({
+    title: '真实任务',
+    status: 'todo',
+    priority: 'medium',
+    source: 'admin',
+    raw_input: '新增任务真实任务'
+  });
+
+  assert.equal(task.id, 'notion-page-1');
+  assert.equal(calls[0]?.url, 'https://api.notion.com/v1/pages');
+  assert.equal((calls[0]?.body.parent as { database_id?: string }).database_id, 'tasks-db');
 });
